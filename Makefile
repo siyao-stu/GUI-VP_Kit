@@ -6,13 +6,29 @@
 BUILDROOT_GIT=https://gitlab.com/buildroot.org/buildroot.git
 BUILDROOT_VERSION=2026.02
 VP_NAME=riscv-vp-plusplus
-VP_GIT=https://github.com/ics-jku/$(VP_NAME).git
+VP_GIT=https://github.com/siyao-stu/$(VP_NAME).git
 VP_VERSION=master
 MRAM_IMAGE_DIR=runtime_mram
-# VP_ARGS can be overriden by user ($ VP_ARGS="..." make run_...)
+UEFI_CODE_IMAGE=edk2/Build/RiscVVirtQemu/DEBUG_GCC/FV/RISCV_VIRT_CODE.fd
+# UEFI_CODE_IMAGE=/home/wangsiyao/riscv-dev/code/UEFI/edk2/Build/RiscVVirtQemu/DEBUG_GCC5/FV/RISCV_VIRT_CODE.fd
+UEFI_VARS_IMAGE=edk2/Build/RiscVVirtQemu/DEBUG_GCC/FV/RISCV_VIRT_VARS.fd
+# UEFI_VARS_IMAGE=/home/wangsiyao/riscv-dev/code/UEFI/edk2/Build/RiscVVirtQemu/DEBUG_GCC5/FV/RISCV_VIRT_VARS.fd
+
+LINUX_RV64_BUILD_DIR?=buildroot_rv64/output/build/linux-6.19.10/
+VMLINUX_RV64?=$(LINUX_RV64_BUILD_DIR)/vmlinux
+RV64_OBJCOPY?=buildroot_rv64/output/host/bin/riscv64-buildroot-linux-gnu-objcopy
+RV64_EFI_BFD_TARGET?=pei-riscv64-little
+EFI_BOOT_DIR?=buildroot_rv64/output/images/efi_boot_rv64
+EFI_SD_IMAGE?=buildroot_rv64/output/images/rv64_efi_sd.img
+VIRTIO_BLK_IMAGE?=$(EFI_SD_IMAGE)
+# VP_ARGS can be overriden by user ($ VP_ARGS="..." make run_...)`
 VP_ARGS?=--use-data-dmi --tlm-global-quantum=1000000 --use-dbbcache --use-lscache --tun-device tun10
+QEMU_VP_ARGS?=--use-data-dmi --tlm-global-quantum=1000000 --use-dbbcache --use-lscache
+GDB_PORT?=1234
+GDB_BIN?=gdb-multiarch
 
 LINUX_DT_GEN=$(VP_NAME)/vp/build/bin/linux-dt-gen.py
+QEMU_VIRT_DT_GEN=$(VP_NAME)/vp/build/bin/qemu_virt-dt-gen.py
 DT_BOOTARGS="earlycon=sbi root=/dev/mtdblock0 rootfstype=squashfs ro"
 BR_DTC="output/host/bin/dtc"
 
@@ -23,7 +39,9 @@ MEM_SIZE_RV64=$(shell echo $$((2 * 1024*1024*1024)))	# 2 GiB
 
 .PHONY: help all get dtb build_rv32 build_rv64 build vp-rebuild buildroot-reconfigure	\
 	buildroot_rv32-rebuild buildroot_rv64-rebuild buildroot-rebuild						\
-	run_rv32 run_rv64 clean distclean
+	run_rv32 run_rv64 run_rv64_mc_uefi run_qemu_virt64_mc_uefi run_qemu_virt64_mc_uefi_dynamic	\
+	run_qemu_virt64_mc_uefi_gdb run_qemu_virt64_mc_uefi_dynamic_gdb run_qemu_virt64_mc_uefi_sd	\
+	build_rv64_efi_sd connect_qemu_virt64_mc_uefi_gdb clean distclean
 
 help:
 	@echo
@@ -78,6 +96,16 @@ run_rv32_sc: build_rv32
 		--memory-size $(MEM_SIZE_RV32)							\
 		buildroot_rv32/output/images/fw_jump.elf
 
+run_qemu_virt64_mc_uefi_dynamic_gdb: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
+		$(QEMU_VP_ARGS)					\
+		--debug-mode					\
+		--debug-port $(GDB_PORT)			\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--memory-size $(MEM_SIZE_RV64)					\
+		buildroot_rv64/output/images/fw_dynamic.elf
 run_rv64_sc: build_rv64
 	$(VP_NAME)/vp/build/bin/linux-sc-vp							\
 		$(VP_ARGS)												\
@@ -87,6 +115,57 @@ run_rv64_sc: build_rv64
 		--mram-data-image $(MRAM_IMAGE_DIR)/mram_rv64_data.img	\
 		--memory-size $(MEM_SIZE_RV64)							\
 		buildroot_rv64/output/images/fw_jump.elf
+
+run_rv64_mc_uefi: build_rv64
+	$(VP_NAME)/vp/build/bin/linux-vp							\
+		$(VP_ARGS)								\
+		--dtb-file=dt/linux-vp_rv64_mc.dtb						\
+		--uefi-code-image $(UEFI_CODE_IMAGE)                    \
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--mram-root-image $(MRAM_IMAGE_DIR)/mram_rv64_root.img	\
+		--mram-data-image $(MRAM_IMAGE_DIR)/mram_rv64_data.img	\
+		--memory-size $(MEM_SIZE_RV64)							\
+		buildroot_rv64/output/images/fw_dynamic.elf
+
+run_qemu_virt64_mc_uefi: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
+		$(QEMU_VP_ARGS)								\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+ 		--kernel-file $(UEFI_CODE_IMAGE)						\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--memory-size $(MEM_SIZE_RV64)							\
+		--debug-cont-sim-on-wait                                \
+		buildroot_rv64/output/images/fw_jump.elf
+
+run_qemu_virt64_mc_uefi_gdb: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
+		$(QEMU_VP_ARGS)								\
+		--debug-mode								\
+		--debug-port $(GDB_PORT)						\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+		--kernel-file $(UEFI_CODE_IMAGE)						\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--memory-size $(MEM_SIZE_RV64)		\
+		buildroot_rv64/output/images/fw_jump.elf
+
+connect_qemu_virt64_mc_uefi_gdb:
+	$(GDB_BIN) \
+		-ex "set architecture riscv:rv64" \
+		-ex "target remote :$(GDB_PORT)" \
+		-ex "symbol-file buildroot_rv64/output/images/fw_jump.elf" \
+		-ex "source $(CURDIR)/tools/riscv_uefi_symbols.py" \
+		-ex "riscv-uefi-load-symbols --sec-fv-base 0x80200000 --dxe-fv-base  0x8305CEE0"
+
+run_qemu_virt64_mc_uefi_dynamic: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
+		$(QEMU_VP_ARGS)								\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--memory-size $(MEM_SIZE_RV64)							\
+		buildroot_rv64/output/images/fw_dynamic.elf
 
 run_rv32_mc: build_rv32
 	$(VP_NAME)/vp/build/bin/linux32-vp							\
@@ -170,20 +249,20 @@ distclean:
 
 .stamp/buildroot_get_sources: .stamp/buildroot_config
 	@echo " + GET BUILDROOT PACKAGE SOURCES"
-	make -C buildroot_rv32 source
-	make -C buildroot_rv64 source
+	env -u LD_LIBRARY_PATH $(MAKE) -C buildroot_rv32 source
+	env -u LD_LIBRARY_PATH $(MAKE) -C buildroot_rv64 source
 	@touch $@
 
 .stamp/buildroot_rv32_build: .stamp/buildroot_get_sources
 	@echo " + BUILD BUILDROOT FOR RV32"
-	make -C buildroot_rv32
+	env -u LD_LIBRARY_PATH $(MAKE) -C buildroot_rv32
 	mkdir -p $(MRAM_IMAGE_DIR)
 	cp buildroot_rv32/output/images/rootfs.squashfs $(MRAM_IMAGE_DIR)/mram_rv32_root.img
 	@touch $@
 
 .stamp/buildroot_rv64_build: .stamp/buildroot_get_sources
 	@echo " + BUILD BUILDROOT FOR RV64"
-	make -C buildroot_rv64
+	env -u LD_LIBRARY_PATH $(MAKE) -C buildroot_rv64
 	mkdir -p $(MRAM_IMAGE_DIR)
 	cp buildroot_rv64/output/images/rootfs.squashfs $(MRAM_IMAGE_DIR)/mram_rv64_root.img
 	@touch $@
@@ -246,4 +325,16 @@ dt/linux-vp_rv32_mc.dtb: dt/linux-vp_rv32_mc.dts .stamp/buildroot_rv32_build
 
 dt/linux-vp_rv64_mc.dtb: dt/linux-vp_rv64_mc.dts .stamp/buildroot_rv64_build
 	@echo " + CREATE VP RV64 MULTICORE DTB: $@"
+	buildroot_rv64/$(BR_DTC) $< -o $@
+
+dt/qemu_virt_rv64_mc.dts: Makefile $(QEMU_VIRT_DT_GEN)
+	@echo " + CREATE QEMU VIRT RV64 MULTICORE DTS: $@"
+	@mkdir -p `dirname $@`
+	$(QEMU_VIRT_DT_GEN)					\
+		--target qemu_virt64-mc-vp			\
+		--memory-size $(MEM_SIZE_RV64)			\
+		--output-file $@
+
+dt/qemu_virt_rv64_mc.dtb: dt/qemu_virt_rv64_mc.dts .stamp/buildroot_rv64_build
+	@echo " + CREATE QEMU VIRT RV64 MULTICORE DTB: $@"
 	buildroot_rv64/$(BR_DTC) $< -o $@
