@@ -29,6 +29,10 @@ SECTION_RE = re.compile(
     r'^\s*\d+\s+(?P<name>\.\S+)\s+[0-9a-fA-F]+\s+(?P<vma>[0-9a-fA-F]+)\s+'
 )
 FV_TXT_RE = re.compile(r'^0x(?P<offset>[0-9a-fA-F]+)\s+(?P<guid>[0-9A-Fa-f-]+)$')
+LOG_DXECORE_RE = re.compile(r'^Loading DxeCore at 0x(?P<addr>[0-9A-Fa-f]+)\b')
+LOG_DRIVER_RE = re.compile(
+    r'^Loading driver at 0x(?P<addr>[0-9A-Fa-f]+)\s+EntryPoint=0x[0-9A-Fa-f]+\s+(?P<name>\S+\.efi)\b'
+)
 
 
 def parse_int(value):
@@ -94,6 +98,27 @@ def parse_fv_txt(fv_txt, guid_map):
     return entries
 
 
+def parse_log_loads(log_path):
+    entries = []
+    for line in log_path.read_text().splitlines():
+        line = line.strip()
+        match = LOG_DXECORE_RE.match(line)
+        if match:
+            addr = int(match.group('addr'), 16)
+            entries.append(('DxeCore', addr))
+            continue
+
+        match = LOG_DRIVER_RE.match(line)
+        if not match:
+            continue
+        addr = int(match.group('addr'), 16)
+        name = match.group('name')
+        module = Path(name).stem
+        entries.append((module, addr))
+
+    return entries
+
+
 def build_symbol_command(debug_file, image_base, sections):
     text_vma = sections.get('.text')
     if text_vma is None:
@@ -108,11 +133,24 @@ def build_symbol_command(debug_file, image_base, sections):
     return command
 
 
-def collect_commands(sec_fv_base, dxe_fv_base):
+def collect_commands(sec_fv_base, dxe_fv_base, log_path=None):
     guid_map = load_guid_xref()
     debug_map = load_debug_files()
     commands = []
     seen_modules = set()
+
+    if log_path is not None:
+        for module_name, image_base in parse_log_loads(log_path):
+            debug_file = debug_map.get(module_name)
+            if debug_file is None:
+                continue
+            sections = read_section_vmas(debug_file)
+            command = build_symbol_command(debug_file, image_base, sections)
+            if command is not None:
+                commands.append((module_name, command))
+                seen_modules.add(module_name)
+
+        return commands
 
     for offset, _, module_name in parse_fv_txt(MAIN_FV_TXT, guid_map):
         debug_file = debug_map.get(module_name)
@@ -139,8 +177,8 @@ def collect_commands(sec_fv_base, dxe_fv_base):
     return commands
 
 
-def emit_commands(sec_fv_base, dxe_fv_base):
-    commands = collect_commands(sec_fv_base, dxe_fv_base)
+def emit_commands(sec_fv_base, dxe_fv_base, log_path=None):
+    commands = collect_commands(sec_fv_base, dxe_fv_base, log_path)
     print(
         f'Preparing {len(commands)} symbol loads '
         f'(sec_fv_base={hex(sec_fv_base)}, dxe_fv_base={hex(dxe_fv_base)})'
@@ -153,10 +191,11 @@ if gdb is not None:
         """Load all RISC-V EDK2 .debug files for the current FV load model.
 
 Usage:
-  riscv-uefi-load-symbols
-  riscv-uefi-load-symbols 0x80200000
-  riscv-uefi-load-symbols --dxe-fv-base 0x80200000 --sec-fv-base 0x80200000
-  riscv-uefi-load-symbols --print-only
+    riscv-uefi-load-symbols
+    riscv-uefi-load-symbols 0x80200000
+    riscv-uefi-load-symbols --dxe-fv-base 0x80200000 --sec-fv-base 0x80200000
+    riscv-uefi-load-symbols --log run_uefi.log
+    riscv-uefi-load-symbols --print-only
         """
 
         def __init__(self):
@@ -167,6 +206,7 @@ Usage:
             sec_fv_base = DEFAULT_SEC_FV_BASE
             dxe_fv_base = DEFAULT_DXE_FV_BASE
             print_only = False
+            log_path = None
 
             index = 0
             while index < len(args):
@@ -174,6 +214,9 @@ Usage:
                 if token == '--print-only':
                     print_only = True
                     index += 1
+                elif token == '--log':
+                    log_path = Path(args[index + 1]).expanduser()
+                    index += 2
                 elif token == '--sec-fv-base':
                     sec_fv_base = parse_int(args[index + 1])
                     index += 2
@@ -185,7 +228,7 @@ Usage:
                     sec_fv_base = dxe_fv_base
                     index += 1
 
-            commands = emit_commands(sec_fv_base, dxe_fv_base)
+            commands = emit_commands(sec_fv_base, dxe_fv_base, log_path)
             for module_name, command in commands:
                 if print_only:
                     print(command)
@@ -205,10 +248,12 @@ else:
     parser.add_argument('base', nargs='?', default=None)
     parser.add_argument('--sec-fv-base', dest='sec_fv_base', default=None)
     parser.add_argument('--dxe-fv-base', dest='dxe_fv_base', default=None)
+    parser.add_argument('--log', dest='log_path', default=None)
     args = parser.parse_args()
 
     dxe_fv_base = parse_int(args.dxe_fv_base or args.base or hex(DEFAULT_DXE_FV_BASE))
     sec_fv_base = parse_int(args.sec_fv_base or args.base or hex(DEFAULT_SEC_FV_BASE))
 
-    for _, command in emit_commands(sec_fv_base, dxe_fv_base):
+    log_path = Path(args.log_path).expanduser() if args.log_path else None
+    for _, command in emit_commands(sec_fv_base, dxe_fv_base, log_path):
         print(command)

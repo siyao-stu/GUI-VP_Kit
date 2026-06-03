@@ -6,26 +6,29 @@
 BUILDROOT_GIT=https://gitlab.com/buildroot.org/buildroot.git
 BUILDROOT_VERSION=2026.02
 VP_NAME=riscv-vp-plusplus
-VP_GIT=https://github.com/siyao-stu/$(VP_NAME).git
+VP_GIT=https://github.com/ics-jku/$(VP_NAME).git
 VP_VERSION=master
 MRAM_IMAGE_DIR=runtime_mram
-UEFI_CODE_IMAGE=edk2/Build/RiscVVirtQemu/DEBUG_GCC/FV/RISCV_VIRT_CODE.fd
-# UEFI_CODE_IMAGE=/home/wangsiyao/riscv-dev/code/UEFI/edk2/Build/RiscVVirtQemu/DEBUG_GCC5/FV/RISCV_VIRT_CODE.fd
-UEFI_VARS_IMAGE=edk2/Build/RiscVVirtQemu/DEBUG_GCC/FV/RISCV_VIRT_VARS.fd
-# UEFI_VARS_IMAGE=/home/wangsiyao/riscv-dev/code/UEFI/edk2/Build/RiscVVirtQemu/DEBUG_GCC5/FV/RISCV_VIRT_VARS.fd
+UEFI_CODE_IMAGE=images/RISCV_VIRT_CODE.fd
+UEFI_VARS_IMAGE=images/RISCV_VIRT_VARS.fd
 
 LINUX_RV64_BUILD_DIR?=buildroot_rv64/output/build/linux-6.19.10/
 VMLINUX_RV64?=$(LINUX_RV64_BUILD_DIR)/vmlinux
+KERNEL_EFI_IMAGE_RV64?=$(LINUX_RV64_BUILD_DIR)/arch/riscv/boot/Image
 RV64_OBJCOPY?=buildroot_rv64/output/host/bin/riscv64-buildroot-linux-gnu-objcopy
 RV64_EFI_BFD_TARGET?=pei-riscv64-little
 EFI_BOOT_DIR?=buildroot_rv64/output/images/efi_boot_rv64
 EFI_SD_IMAGE?=buildroot_rv64/output/images/rv64_efi_sd.img
 VIRTIO_BLK_IMAGE?=$(EFI_SD_IMAGE)
+EFI_ESP_OFFSET?=1048576
 # VP_ARGS can be overriden by user ($ VP_ARGS="..." make run_...)`
 VP_ARGS?=--use-data-dmi --tlm-global-quantum=1000000 --use-dbbcache --use-lscache --tun-device tun10
 QEMU_VP_ARGS?=--use-data-dmi --tlm-global-quantum=1000000 --use-dbbcache --use-lscache
 GDB_PORT?=1234
 GDB_BIN?=gdb-multiarch
+UEFI_SEC_FV_BASE?=0x80200000
+UEFI_DXE_FV_BASE?=0x80200000
+KERNEL_VIRT_BASE?=0xffffffff80000000
 
 LINUX_DT_GEN=$(VP_NAME)/vp/build/bin/linux-dt-gen.py
 QEMU_VIRT_DT_GEN=$(VP_NAME)/vp/build/bin/qemu_virt-dt-gen.py
@@ -41,7 +44,7 @@ MEM_SIZE_RV64=$(shell echo $$((2 * 1024*1024*1024)))	# 2 GiB
 	buildroot_rv32-rebuild buildroot_rv64-rebuild buildroot-rebuild						\
 	run_rv32 run_rv64 run_rv64_mc_uefi run_qemu_virt64_mc_uefi run_qemu_virt64_mc_uefi_dynamic	\
 	run_qemu_virt64_mc_uefi_gdb run_qemu_virt64_mc_uefi_dynamic_gdb run_qemu_virt64_mc_uefi_sd	\
-	build_rv64_efi_sd connect_qemu_virt64_mc_uefi_gdb clean distclean
+	build_rv64_efi_sd connect_qemu_virt64_mc_uefi_gdb connect_qemu_virt64_mc_uefi_sd_gdb_kernel connect_qemu_virt64_mc_uefi_sd_gdb_kernel_auto clean distclean
 
 help:
 	@echo
@@ -138,6 +141,29 @@ run_qemu_virt64_mc_uefi: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_vir
 		--debug-cont-sim-on-wait                                \
 		buildroot_rv64/output/images/fw_jump.elf
 
+run_qemu_virt64_mc_uefi_sd: build_rv64_efi_sd .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp						\
+		$(QEMU_VP_ARGS)							\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--virtio-blk-image $(VIRTIO_BLK_IMAGE)				\
+		--virtio-blk-debug					\
+		--memory-size $(MEM_SIZE_RV64)						\
+		buildroot_rv64/output/images/fw_dynamic.elf
+run_qemu_virt64_mc_uefi_sd_gdb: build_rv64_efi_sd .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp						\
+		$(QEMU_VP_ARGS)							\
+		--debug-mode								\
+		--debug-port $(GDB_PORT)						\
+		--dtb-file=dt/qemu_virt_rv64_mc.dtb					\
+		--uefi-code-image $(UEFI_CODE_IMAGE)					\
+		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--virtio-blk-image $(VIRTIO_BLK_IMAGE)				\
+		--debug-cont-sim-on-wait						\
+		--memory-size $(MEM_SIZE_RV64)						\
+		buildroot_rv64/output/images/fw_dynamic.elf
+
 run_qemu_virt64_mc_uefi_gdb: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
 	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
 		$(QEMU_VP_ARGS)								\
@@ -147,6 +173,7 @@ run_qemu_virt64_mc_uefi_gdb: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu
 		--kernel-file $(UEFI_CODE_IMAGE)						\
 		--uefi-code-image $(UEFI_CODE_IMAGE)					\
 		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
+		--debug-cont-sim-on-wait						\
 		--memory-size $(MEM_SIZE_RV64)		\
 		buildroot_rv64/output/images/fw_jump.elf
 
@@ -156,7 +183,38 @@ connect_qemu_virt64_mc_uefi_gdb:
 		-ex "target remote :$(GDB_PORT)" \
 		-ex "symbol-file buildroot_rv64/output/images/fw_jump.elf" \
 		-ex "source $(CURDIR)/tools/riscv_uefi_symbols.py" \
-		-ex "riscv-uefi-load-symbols --sec-fv-base 0x80200000 --dxe-fv-base  0x8305CEE0"
+		-ex "riscv-uefi-load-symbols --log $(CURDIR)/run_uefi.log" \
+		-ex "add-symbol-file $(VMLINUX_RV64) $(KERNEL_VIRT_BASE)"
+
+connect_qemu_virt64_mc_uefi_gdb_fv:
+	$(GDB_BIN) \
+		-ex "set architecture riscv:rv64" \
+		-ex "target remote :$(GDB_PORT)" \
+		-ex "symbol-file buildroot_rv64/output/images/fw_jump.elf" \
+		-ex "source $(CURDIR)/tools/riscv_uefi_symbols.py" \
+		-ex "riscv-uefi-load-symbols --sec-fv-base $(UEFI_SEC_FV_BASE) --dxe-fv-base $(UEFI_DXE_FV_BASE)" \
+		-ex "add-symbol-file $(VMLINUX_RV64) $(KERNEL_VIRT_BASE)"
+
+connect_qemu_virt64_mc_uefi_sd_gdb_kernel:
+	$(GDB_BIN) \
+		-ex "set architecture riscv:rv64" \
+		-ex "target remote :$(GDB_PORT)" \
+		-ex "file $(VMLINUX_RV64)" \
+		-ex "break _start_kernel" \
+		-ex "break start_kernel"
+
+connect_qemu_virt64_mc_uefi_sd_gdb_kernel_auto:
+	$(GDB_BIN) \
+		-ex "set pagination off" \
+		-ex "set architecture riscv:rv64" \
+		-ex "file $(VMLINUX_RV64)" \
+		-ex "target remote :$(GDB_PORT)" \
+		-ex "break _start_kernel" \
+		-ex "break start_kernel" \
+		-ex "break setup_arch" \
+		-ex "break mm_init" \
+		-ex "break rest_init" \
+		-ex "continue"
 
 run_qemu_virt64_mc_uefi_dynamic: .stamp/vp_build .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
 	$(VP_NAME)/vp/build/bin/qemu_virt64-mc-vp					\
@@ -166,6 +224,34 @@ run_qemu_virt64_mc_uefi_dynamic: .stamp/vp_build .stamp/buildroot_rv64_build dt/
 		--uefi-vars-image $(UEFI_VARS_IMAGE)					\
 		--memory-size $(MEM_SIZE_RV64)							\
 		buildroot_rv64/output/images/fw_dynamic.elf
+
+build_rv64_efi_sd: .stamp/buildroot_rv64_build dt/qemu_virt_rv64_mc.dtb
+	@echo " + CREATE RV64 EFI SD IMAGE: $(EFI_SD_IMAGE)"
+	@test -f $(KERNEL_EFI_IMAGE_RV64) || (echo "Missing kernel EFI Image at $(KERNEL_EFI_IMAGE_RV64). Run 'make build_rv64' first." && exit 1)
+	@test -f buildroot_rv64/output/images/rootfs.tar || (echo "Missing rootfs.tar. Run 'make build_rv64' first." && exit 1)
+	@command -v sfdisk >/dev/null || (echo "sfdisk not found. Install util-linux." && exit 1)
+	@command -v mcopy >/dev/null || (echo "mcopy not found. Install mtools." && exit 1)
+	@command -v mmd >/dev/null || (echo "mmd not found. Install mtools." && exit 1)
+	@command -v mformat >/dev/null || (echo "mformat not found. Install mtools." && exit 1)
+	@command -v cpio >/dev/null || (echo "cpio not found. Install cpio." && exit 1)
+	rm -rf $(EFI_BOOT_DIR)
+	mkdir -p $(EFI_BOOT_DIR)/EFI/BOOT $(EFI_BOOT_DIR)/dtb $(EFI_BOOT_DIR)/rootfs
+	cp $(KERNEL_EFI_IMAGE_RV64) $(EFI_BOOT_DIR)/EFI/BOOT/BOOTRISCV64.EFI
+	cp dt/qemu_virt_rv64_mc.dtb $(EFI_BOOT_DIR)/dtb/qemu_virt_rv64_mc.dtb
+	tar -xf buildroot_rv64/output/images/rootfs.tar -C $(EFI_BOOT_DIR)/rootfs
+	printf 'nod /dev/console 0600 0 0 c 5 1\nnod /dev/null 0666 0 0 c 1 3\n' > $(EFI_BOOT_DIR)/initrd-devnodes.txt
+	(cd $(LINUX_RV64_BUILD_DIR) && usr/gen_initramfs.sh -o $(CURDIR)/$(EFI_BOOT_DIR)/initrd.cpio -u 0 -g 0 $(CURDIR)/$(EFI_BOOT_DIR)/rootfs $(CURDIR)/$(EFI_BOOT_DIR)/initrd-devnodes.txt)
+	rm -f $(EFI_BOOT_DIR)/initrd-devnodes.txt
+	rm -rf $(EFI_BOOT_DIR)/rootfs
+	printf '\\EFI\\BOOT\\BOOTRISCV64.EFI dtb=\\dtb\\qemu_virt_rv64_mc.dtb initrd=\\initrd.cpio rdinit=/sbin/init console=ttyS0,115200n8 earlycon=uart8250,mmio,0x10000000,115200 loglevel=7 ignore_loglevel\n' > $(EFI_BOOT_DIR)/startup.nsh
+	dd if=/dev/zero of=$(EFI_SD_IMAGE) bs=1M count=512
+	printf 'label: gpt\nfirst-lba: 2048\n, , U\n' | sfdisk $(EFI_SD_IMAGE)
+	mformat -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) -F -v EFI ::
+	mmd -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) ::/EFI ::/EFI/BOOT ::/dtb
+	mcopy -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) $(EFI_BOOT_DIR)/EFI/BOOT/BOOTRISCV64.EFI ::/EFI/BOOT/BOOTRISCV64.EFI
+	mcopy -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) $(EFI_BOOT_DIR)/dtb/qemu_virt_rv64_mc.dtb ::/dtb/qemu_virt_rv64_mc.dtb
+	mcopy -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) $(EFI_BOOT_DIR)/initrd.cpio ::/initrd.cpio
+	mcopy -i $(EFI_SD_IMAGE)@@$(EFI_ESP_OFFSET) $(EFI_BOOT_DIR)/startup.nsh ::/startup.nsh
 
 run_rv32_mc: build_rv32
 	$(VP_NAME)/vp/build/bin/linux32-vp							\
